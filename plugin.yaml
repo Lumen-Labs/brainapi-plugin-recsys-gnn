@@ -1,0 +1,17 @@
+name: recsys-gnn
+version: "0.2.0"
+entry_point: main
+description: >
+  LightGCN recommender plugin. BrainAPI is the KB (structured ingest + graph);
+  this plugin exports user–item edges, trains LightGCN, and serves /recsys/recommend.
+  Additive only — does not replace POST /ingest/ or core synergies.
+  See docs/research/15 §7.5 and docs/research/16-recsys-eval-protocol.md.
+author: BrainAPI
+brainapi_version: ">=2.14.0"
+tags:
+  - recsys
+  - gnn
+  - lightgcn
+priority: 50
+pip_dependencies:
+  - numpy
