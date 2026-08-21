@@ -1,0 +1,99 @@
+name: Publish to BrainAPI registry
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Overwrite an existing version in the registry
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read plugin.yaml
+        id: manifest
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          text = Path("plugin.yaml").read_text(encoding="utf-8")
+
+          def field(key: str) -> str:
+              match = re.search(rf"^{key}:\s*[\"']?([^\"'\n]+)", text, re.M)
+              if not match:
+                  raise SystemExit(f"missing {key} in plugin.yaml")
+              return match.group(1).strip()
+
+          name = field("name")
+          version = field("version")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as fh:
+              fh.write(f"name={name}\n")
+              fh.write(f"version={version}\n")
+          print(f"Publishing {name}@{version}")
+          PY
+
+      - name: Pack plugin
+        run: |
+          set -euo pipefail
+          NAME="${{ steps.manifest.outputs.name }}"
+          VERSION="${{ steps.manifest.outputs.version }}"
+          STAGE="$(mktemp -d)"
+          mkdir -p "$STAGE/$NAME"
+          git archive --format=tar HEAD | tar -x -C "$STAGE/$NAME"
+          rm -rf "$STAGE/$NAME/.github"
+          mkdir -p dist
+          tar -C "$STAGE" -czf "dist/${NAME}-${VERSION}.tar.gz" "$NAME"
+          echo "Archive contents:"
+          tar -tzf "dist/${NAME}-${VERSION}.tar.gz"
+
+      - name: Publish to registry
+        env:
+          PLUGIN_REGISTRY_URL: ${{ vars.PLUGIN_REGISTRY_URL }}
+          PLUGIN_PUBLISHER_ID: ${{ secrets.PLUGIN_PUBLISHER_ID }}
+          PLUGIN_PUBLISHER_API_KEY: ${{ secrets.PLUGIN_PUBLISHER_API_KEY }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force || false }}
+          NAME: ${{ steps.manifest.outputs.name }}
+          VERSION: ${{ steps.manifest.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PLUGIN_PUBLISHER_ID:-}" ] || [ -z "${PLUGIN_PUBLISHER_API_KEY:-}" ]; then
+            echo "Missing PLUGIN_PUBLISHER_ID or PLUGIN_PUBLISHER_API_KEY secrets" >&2
+            exit 1
+          fi
+          REGISTRY="${PLUGIN_REGISTRY_URL:-https://registry.brain-api.dev}"
+          REGISTRY="${REGISTRY%/}"
+          ARCHIVE="dist/${NAME}-${VERSION}.tar.gz"
+          URL="${REGISTRY}/plugins"
+          if [ "${FORCE}" = "true" ]; then
+            URL="${URL}?force=true"
+          fi
+          HTTP_CODE=$(curl -sS -o /tmp/registry-response.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${PLUGIN_PUBLISHER_API_KEY}" \
+            -H "X-Publisher-Id: ${PLUGIN_PUBLISHER_ID}" \
+            -F "archive=@${ARCHIVE};type=application/gzip" \
+            "${URL}")
+          echo "Registry responded with HTTP ${HTTP_CODE}"
+          cat /tmp/registry-response.json
+          echo
+          if [ "${HTTP_CODE}" = "200" ] || [ "${HTTP_CODE}" = "201" ]; then
+            exit 0
+          fi
+          if [ "${HTTP_CODE}" = "409" ] && [ "${FORCE}" != "true" ]; then
+            echo "Version ${NAME}@${VERSION} is already published; skipping."
+            exit 0
+          fi
+          exit 1
